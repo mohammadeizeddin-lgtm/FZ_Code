@@ -219,7 +219,7 @@ def _policy(source, manual_row, mask_value, allow_image_only_crop):
     return token, mask
 
 
-def process_sem_images(images, output_folder, csv_name='metadata.csv', recursive=False,
+def clip_sem_images_extract_info(images, output_folder, csv_name='metadata.csv', recursive=False,
                        *, crop_rows=None, exclusion_masks=None, allow_image_only_crop=False):
     """Process TIFFs incrementally with manufacturer-independent review handling.
 
@@ -343,7 +343,7 @@ if __name__ == '__main__':
     parser.add_argument('--crop-rows', help='JSON mapping of source paths/unique filenames to approved crop rows')
     args = parser.parse_args()
     decisions = json.loads(Path(args.crop_rows).read_text(encoding='utf-8')) if args.crop_rows else None
-    result = process_sem_images(args.images, args.output, args.csv_name, args.recursive,
+    result = clip_sem_images_extract_info(args.images, args.output, args.csv_name, args.recursive,
         crop_rows=decisions, allow_image_only_crop=args.allow_image_only_crop)
     print(json.dumps(result, indent=2))
     raise SystemExit(1 if result['failed'] else 0)
