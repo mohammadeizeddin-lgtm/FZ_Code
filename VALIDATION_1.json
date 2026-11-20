@@ -1,0 +1,28 @@
+{
+  "checks": [
+    "Single TIFF processing, exact float32 roundtrip, unchanged rerun without CSV rewrite.",
+    "New image appends a record; duplicate input arguments are deduplicated.",
+    "Changed settings append history and log actual correction/clipping limits, pixel counts and operation order.",
+    "Custom CSV notes retained when new images are added.",
+    "Missing output repaired without duplicate recipe records.",
+    "recursive controls plain-folder discovery; generated output folder is excluded.",
+    "Invalid image failure logged without stopping other images.",
+    "Missing NLM dependency is logged as failure; no silent fallback or fake denoised output.",
+    "Extraction CSV selects only active approved images, excludes review/mask/history TIFFs, carries calibration and leaves source CSV unchanged.",
+    "Images requiring an exclusion mask are explicitly flagged rather than processed across invalid annotations.",
+    "Blank upstream schema extensions do not invalidate unchanged image records."
+  ],
+  "source_unchanged": true,
+  "actual_tiff_backend": "Pillow fallback",
+  "native_tifffile_available": false,
+  "native_non_local_means_available": false,
+  "parameter_csv_checks": [
+    "Plain-folder CSV contains only image names and the five requested parameter columns.",
+    "Disabled Gaussian correction logs None sigma and ignores inactive sigma for caching.",
+    "Enabled clipping/Gaussian log the exact supplied range and sigma.",
+    "Simple CSV plus per-image audits recover bookkeeping without processing again.",
+    "New images append, existing recipes skip, reviewer notes remain.",
+    "Failures are retained in JSON/summary without adding diagnostic CSV columns.",
+    "Old detailed example migrated to 150 columns with two existing records and unchanged TIFF bytes."
+  ]
+}
