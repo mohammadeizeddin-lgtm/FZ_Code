@@ -15,7 +15,7 @@ All stages support percentage progress, incremental updates and reuse of verifie
 
 ## Setup
 
-Use **Python 3.12+** and keep all supplied `.py` files together, including `sem_progress.py`.
+Use **Python 3.12+** and keep all supplied `.py` files together, including `sem_progress.py` and `sem_paths.py`.
 
 ```sh
 python -m pip install -r requirements.txt
@@ -30,15 +30,16 @@ from preprocessing import preprocess_images
 from segmentation import segment_images
 from extracting_discriptors import particle_size_distribution
 
-base = Path(r"C:\SEM")
+base = Path(r"C:\SEM\Sample_A")
 processed = base / "processed"
-preprocessed = processed / "preprocessed"
 
 # 1. Extract metadata and prepare approved specimen images.
 print(process_sem_images(base / "raw", processed, recursive=True))
 
 # 2. Normalise only; optional preprocessing defaults off.
-print(preprocess_images(processed, preprocessed))
+preprocessing = preprocess_images(processed)
+print(preprocessing)
+preprocessed = Path(preprocessing["output_folder"])
 
 # 3. Otsu segmentation, then Chan–Vese with contour-based sizing.
 print(segment_images(preprocessed, method="OTSU"))
@@ -57,6 +58,7 @@ print(particle_size_distribution(
 ## Main options
 
 - **Inputs:** one TIFF, multiple paths or a folder for extraction/preprocessing. `recursive=True` includes subfolders; preprocessing automatically selects approved extraction outputs.
+- **Output folders:** omitting `output_folder` creates `<parent>_preprocessed`, or `<parent>_preprocessed_clipped` when clipping is enabled. Intermediate `raw`, `images` and `processed` directory names are skipped when identifying the sample name. Explicit output paths are honoured; image filenames stay unchanged.
 - **Crop review:** approve boundaries with `crop_rows={"example.tif": 768}`. Exclusion masks are supported during extraction; masked cases require mask-aware downstream processing and are held for review.
 - **Preprocessing:** `clipping_percentile_range=(1, 99)` enables clipping. `gentle_denoising` and `gaussian_correction_filter` are independent options; `background_sigma` is in pixels.
 - **Segmentation:** choose `foreground="bright"` or `"dark"`. `measure_particles=False` disables Chan–Vese contour sizing. Otsu only segments here.
@@ -74,9 +76,33 @@ Under `preprocessed/segmented/`:
 | `contour_particles.csv` / `contour_psd_summary.csv` | Chan–Vese contour measurements and distribution summaries |
 | `binary_descriptors/` | `binary_particles.csv`, `binary_psd_summary.csv`, labelled images and plots |
 | `segmentation_history.csv` | Per-segmentation records with separate `contour_psd_*` and `binary_psd_*` statistics |
+| `json/` subfolders | Audit and processing JSON records, kept separate from images, plots and CSVs |
 
 Measurement records include plots, labelled images and retained contour coordinates where applicable. Summary tables retain earlier settings; segmentation history shows the latest summary per route.
 
+Existing folders remain usable: recognised JSON records move into `json/` when the stage runs, and references are updated. Existing image files and output folders are not renamed. Conflicting JSON records are retained and reported rather than overwritten.
+
 Calibration comes **per image** from CSV fields `pixel_size_x_nm` and `pixel_size_y_nm`. Sizes use µm when calibrated, otherwise explicitly labelled pixel units. Touching particles remain one object. Border-cut objects are excluded by default; open contours have no area measurement.
+
+## File hashes and filenames
+
+The scripts generate **SHA-256 fingerprints** to track files and settings, verify outputs and skip unchanged results.
+
+| Field | Identifies |
+| --- | --- |
+| `source_id` | The original file's resolved path; moving or renaming it changes this ID. |
+| `source_sha256` | The original TIFF's exact contents, including pixels and embedded metadata. |
+| `output_sha256` | The saved processed TIFF's exact contents. |
+| `policy_hash` | Extraction settings and version identifiers, including crop decisions and exclusion masks. |
+| `review_image_sha256` | The unchanged TIFF copy saved for review. |
+| `analysis_mask_sha256` | The saved exclusion-mask file. |
+
+Extracted filenames use the first **12 characters** of three fingerprints:
+
+```text
+original_name__source_id__source_hash__policy_hash.tif
+```
+
+Full values in CSV/JSON contain 64 hexadecimal characters. Copying an unchanged file elsewhere keeps its content hash but changes its path ID. Cropping changes the output file hash even when all retained pixels remain identical.
 
 **Before analysis:** review warnings and validate boundaries and fine features. Raw cropping supports single-page 8/16-bit grayscale TIFFs; unsupported crops go to review. Non-TIFF inputs and universal private-vendor decoding are unsupported. Keep originals, CSVs and audit JSON, and close CSVs in Excel before running.

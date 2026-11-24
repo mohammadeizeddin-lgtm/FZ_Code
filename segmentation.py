@@ -28,7 +28,7 @@ Unspecified parameters use the documented defaults in CHAN_VESE_DEFAULTS.
 Masks: uint8 TIFF, 0=background and 255=selected foreground, original dimensions.
 Overlays: lossless RGB PNG with foreground tinted red; visualisation only.
 The CSV is Excel-readable; no separate XLSX workbook is generated.
-Detailed diagnostics stay in segmented/segmentation_records.json.
+Detailed diagnostics stay in segmented/json/segmentation_records.json.
 Keep extracting_discriptors.py beside this file. This module measures ONLY
 retained Chan-Vese contours when measure_particles=True (default). Otsu does
 segmentation only here: no contour or pixel-count measurements are made for it.
@@ -537,7 +537,8 @@ def _measure_record(record_id, record, folder, metadata_rows, distribution_optio
     destination.mkdir(exist_ok=True)
     prefix = mask_file.stem[:35].replace('.', '_')
     base = destination / (prefix + '__' + measurement_id[:16])
-    report = base.with_suffix('.json')
+    organise_json_records(destination)
+    report = json_record_path(base.with_suffix('.json'))
     report_hash = _hash_file(report) if report.exists() else None
     if report.exists():
         audit = json.loads(report.read_text(encoding='utf-8'))
@@ -692,6 +693,7 @@ def _sync_preprocessing_history(file, rows, image_column):
     Synchronising the same two keys prevents that projection discarding updates.
     Old workflows without this cache require no extra file changes.
     """
+    file = json_record_path(file)
     if not file.exists():
         return
     digest = _hash_file(file)
@@ -716,7 +718,8 @@ def segment_images(images, output_folder=None, *, method='OTSU', foreground='bri
                    nbins=256, overlay_alpha=0.35, recursive=False,
                    csv_name='preprocessing_metadata.csv', chan_vese_parameters=None,
                    measure_particles=True, percentile_range=(10, 90),
-                   area_basis='solid', exclude_border=True, histogram_bins=30):
+                   area_basis='solid', exclude_border=True, histogram_bins=30,
+                   show_progress=True):
     """Segment all previous-stage image records and update the SAME CSV.
 
     images is the preprocessing output folder (not its segmented subfolder).
@@ -729,7 +732,7 @@ def segment_images(images, output_folder=None, *, method='OTSU', foreground='bri
     use output_folder/segmentation_history.csv (one row per record ID).
     Existing JSON records are exported automatically, including older methods.
     Identical reruns update/reuse a row; different settings create another row.
-    Full numerical diagnostics remain in segmentation_records.json.
+    Full numerical diagnostics remain in json/segmentation_records.json.
     measure_particles=True measures ONLY retained Chan-Vese contours. It has no
     effect for Otsu. Binary-mask areas for either method belong to the separate
     extracting_discriptors.particle_size_distribution function.
@@ -796,6 +799,7 @@ def segment_images(images, output_folder=None, *, method='OTSU', foreground='bri
         raise RuntimeError('Preprocessing/segmentation is running, or a stale .preprocessing.lock exists.') from exc
     with os.fdopen(fd, 'w') as f:
         f.write(str(os.getpid()))
+    progress = None
     try:
         fields, rows, image_column, csv_hash = _read_csv(csv_file)
         before_rows = [dict(row) for row in rows]
@@ -822,7 +826,9 @@ def segment_images(images, output_folder=None, *, method='OTSU', foreground='bri
         if not grouped:
             raise ValueError('No CSV-referenced preprocessing images match the selected folder/recursive setting.')
         folder.mkdir(parents=True, exist_ok=True)
-        history_file = folder / 'segmentation_records.json'
+        for directory in (folder, folder / 'measurements', folder / 'contour_measurements', folder / 'binary_descriptors'):
+            organise_json_records(directory)
+        history_file = json_record_path(folder / 'segmentation_records.json')
         history_hash = _hash_file(history_file) if history_file.exists() else None
         if history_file.exists():
             history = json.loads(history_file.read_text(encoding='utf-8'))
@@ -849,7 +855,8 @@ def segment_images(images, output_folder=None, *, method='OTSU', foreground='bri
                        measurement_failed=0, measurement_errors=[], calibration_warnings=[])
         history_changed = False
         measurement_audits = []
-        for source, indices in sorted(grouped.items(), key=lambda pair: str(pair[0])):
+        progress = Progress(len(grouped), f'{method} segmentation', enabled=show_progress).start()
+        for source, indices in progress.items(sorted(grouped.items(), key=lambda pair: str(pair[0])), name=lambda pair: pair[0].name):
             source_hash = ''
             identity = os.path.normcase(str(source))
             record_id = _hash_json([identity, 'unreadable', recipe_hash])
@@ -929,6 +936,7 @@ def segment_images(images, output_folder=None, *, method='OTSU', foreground='bri
                     summary['measurement_failed'] += 1
                     summary['measurement_errors'].append(dict(input_file=str(source),
                         error=f'{type(exc).__name__}: {exc}'))
+        progress.status('saving segmentation and PSD CSVs')
         if _hash_file(csv_file) != csv_hash:
             raise RuntimeError('Preprocessing CSV changed during segmentation/contour measurement; rerun with the latest calibration.')
         if history_changed or not history_file.exists():
@@ -948,7 +956,15 @@ def segment_images(images, output_folder=None, *, method='OTSU', foreground='bri
             _write_csv(csv_file, rows, fields, csv_hash)
         return summary
     finally:
+        if progress is not None:
+            progress.close()
         lock.unlink(missing_ok=True)
+
+
+from sem_paths import json_record_path, organise_json_records
+from sem_progress import Progress, instrument_functions
+instrument_functions(globals(), exclude=('segment_images',),
+    include_private=('_particle_regions', '_measure_record', '_save_outputs', '_save_level_set'))
 
 
 if __name__ == '__main__':
@@ -962,6 +978,7 @@ if __name__ == '__main__':
     parser.add_argument('--nbins', type=int, default=256)
     parser.add_argument('--overlay-alpha', type=float, default=0.35)
     parser.add_argument('--recursive', action='store_true')
+    parser.add_argument('--no-progress', action='store_true', help='Disable console progress')
     parser.add_argument('--csv-name', default='preprocessing_metadata.csv')
     parser.add_argument('--no-particle-measurements', action='store_true',
         help='Skip Chan-Vese contour size distributions (Otsu never measures here)')
@@ -975,6 +992,6 @@ if __name__ == '__main__':
         csv_name=args.csv_name, chan_vese_parameters=args.chan_vese_parameters,
         measure_particles=not args.no_particle_measurements, percentile_range=args.percentiles,
         area_basis=args.area_basis, exclude_border=not args.include_border,
-        histogram_bins=args.histogram_bins)
+        histogram_bins=args.histogram_bins, show_progress=not args.no_progress)
     print(json.dumps(result, indent=2))
     raise SystemExit(1 if result['failed'] or result['measurement_failed'] else 0)

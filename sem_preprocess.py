@@ -293,6 +293,7 @@ def _discover(images, output_folder, recursive, input_metadata_csv):
             iterator = file.rglob('*') if file.is_dir() and recursive else (file.glob('*') if file.is_dir() else [file])
             selection = [(p.resolve(), {}, '') for p in iterator if p.is_file()
                 and p.suffix.lower() in ('.tif','.tiff') and not _inside(p.resolve(), output_folder)
+                and not (file.is_dir() and inside_generated_preprocessing(p, file))
                 and not p.name.lower().endswith(('.analysis_mask.tif','.mask.tif'))]
         for image_file, metadata, manifest_name in selection:
             if _inside(image_file, output_folder):continue
@@ -312,7 +313,7 @@ def _tiff_metadata(file):
 
 def _source_audit_metadata(file, metadata):
     """Supplement source CSV fields from the extraction audit, if available."""
-    audit = file.with_suffix('.json')
+    audit = source_audit_path(file)
     if not audit.exists():return metadata
     try:data=json.loads(audit.read_text(encoding='utf-8'))
     except (OSError, ValueError):return metadata
@@ -408,7 +409,7 @@ def _read_history(records_file,csv_file):
             image=(csv_file.parent/public['processed_image']).resolve()
             if not _inside(image,csv_file.parent.resolve()):
                 raise ValueError('CSV output path is outside the output folder.')
-            audit=json.loads(image.with_suffix('.json').read_text(encoding='utf-8'))
+            audit=json.loads(audit_json_path(image).read_text(encoding='utf-8'))
             record={k:v for k,v in public.items() if k not in PARAMETER_COLUMNS}
             record.update({PREFIX+'record_id':audit['record_id'],PREFIX+'status':'success',
                 PREFIX+'input_file':public['image_file'],PREFIX+'output_image':public['processed_image'],
@@ -421,6 +422,27 @@ def _read_history(records_file,csv_file):
 
     # Retain user-added notes. Acquisition fields and parameter fields are managed.
     by_output={r.get(PREFIX+'output_image'):r for r in records if r.get(PREFIX+'output_image')}
+    for relative, record in by_output.items():
+        manifest = record.get(PREFIX+'input_metadata_csv')
+        upstream_audit = record.get('audit_json')
+        if manifest and upstream_audit:
+            manifest_folder = Path(manifest).parent
+            upstream_path = (manifest_folder / upstream_audit).resolve()
+            if _inside(upstream_path, manifest_folder.resolve()):
+                moved = json_record_path(upstream_path)
+                if moved.is_file():
+                    reference = moved.relative_to(manifest_folder).as_posix()
+                    if upstream_audit != reference:
+                        record['audit_json'] = reference
+                        migrated = True
+        image = (csv_file.parent / relative).resolve()
+        if _inside(image, csv_file.parent.resolve()) and image.is_file():
+            audit = audit_json_path(image)
+            if audit.is_file():
+                reference = audit.relative_to(csv_file.parent).as_posix()
+                if record.get(PREFIX+'audit_json') != reference:
+                    record[PREFIX+'audit_json'] = reference
+                    migrated = True
     if set(PARAMETER_COLUMNS)<=set(csv_fields):
         for public in csv_rows:
             record=by_output.get(public['processed_image'])
@@ -452,18 +474,21 @@ def _existing_result(root, row, record_id):
     relative = row.get(PREFIX+'output_image','')
     if not relative:return None
     file = (root / relative).resolve()
-    if not _inside(file, root) or not file.is_file() or not file.with_suffix('.json').is_file():return None
+    if not _inside(file, root) or not file.is_file():return None
+    audit_file=audit_json_path(file)
+    if not audit_file.is_file():return None
     try:
-        audit=json.loads(file.with_suffix('.json').read_text())
+        audit=json.loads(audit_file.read_text())
         if audit.get('record_id') != record_id or _hash_file(file) != audit.get('output_sha256'):return None
         return audit
     except (OSError,ValueError,AttributeError):return None
 
 
-def preprocess_images(images, output_folder, clipping_percentile_range=None, *,
+def preprocess_images(images, output_folder=None, clipping_percentile_range=None, *,
                       gaussian_correction_filter=False, background_sigma=None,
                       gentle_denoising=False, recursive=False,
-                      csv_name='preprocessing_metadata.csv', input_metadata_csv=None):
+                      csv_name='preprocessing_metadata.csv', input_metadata_csv=None,
+                      show_progress=True):
     """Preprocess approved TIFF outputs and maintain a separate extended CSV.
 
     Accept one file, a list of files/folders, or a folder. When extraction
@@ -475,8 +500,13 @@ def preprocess_images(images, output_folder, clipping_percentile_range=None, *,
     Each unique source path + source content + recipe has one record. New images
     or different recipes APPEND history. Identical reruns skip verified results.
     Existing files and original extraction CSVs are never overwritten.
+    Omit output_folder for <sample>_preprocessed[_clipped] inside the input
+    folder; explicit output paths are honoured. Image filenames are unchanged.
+    JSON records are kept in json/; legacy records are migrated on use.
     """
-    root=Path(output_folder).expanduser().resolve()
+    if not isinstance(images,(str,os.PathLike)):images=list(images)
+    root=(preprocessing_output_folder(images,clipping_percentile_range) if output_folder is None
+          else Path(output_folder).expanduser().resolve())
     if Path(csv_name).name!=csv_name or Path(csv_name).suffix.lower()!='.csv':
         raise ValueError('csv_name must be a CSV filename.')
     selected=_discover(images,root,recursive,input_metadata_csv)
@@ -489,9 +519,11 @@ def preprocess_images(images, output_folder, clipping_percentile_range=None, *,
     try:fd=os.open(lock,os.O_CREAT|os.O_EXCL|os.O_WRONLY)
     except FileExistsError as exc:raise RuntimeError('Another run or a stale .preprocessing.lock exists.') from exc
     with os.fdopen(fd,'w') as f:f.write(str(os.getpid()))
+    progress=None
     try:
+        organise_json_records(root)
         csv_hash=_hash_file(csv_file) if csv_file.exists() else None
-        records_file=csv_file.with_suffix('.records.json')
+        records_file=json_record_path(csv_file.with_suffix('.records.json'))
         records_hash=_hash_file(records_file) if records_file.exists() else None
         rows,fields,public_before,migrated=_read_history(records_file,csv_file)
         indices={}
@@ -510,7 +542,8 @@ def preprocess_images(images, output_folder, clipping_percentile_range=None, *,
         summary=dict(input_count=len(selected),processed=0,skipped=0,failed=0,needs_review=0,
                      output_folder=str(root),csv_path=str(csv_file),errors=[])
         dirty=migrated
-        for source,source_metadata,manifest in selected:
+        progress=Progress(len(selected),'Preprocessing',enabled=show_progress).start()
+        for source,source_metadata,manifest in progress.items(selected,name=lambda item:item[0].name):
             source_id=hashlib.sha256(os.path.normcase(str(source)).encode()).hexdigest()
             digest=''
             try:digest=_hash_file(source)
@@ -520,6 +553,8 @@ def preprocess_images(images, output_folder, clipping_percentile_range=None, *,
             # not change their scientific metadata or require new processing.
             metadata_signature={k:str(_scalar_csv(v)) for k,v in metadata.items()
                                 if v is not None and str(_scalar_csv(v))!=''}
+            if 'audit_json' in metadata_signature:
+                metadata_signature['audit_json']=legacy_json_reference(metadata_signature['audit_json'])
             metadata_hash=_hash_json(metadata_signature)
             record_id=_hash_json([source_id,digest or 'unreadable',recipe_hash,metadata_hash])
             previous=rows[indices[record_id]] if record_id in indices else {}
@@ -557,7 +592,7 @@ def preprocess_images(images, output_folder, clipping_percentile_range=None, *,
                         candidate={PREFIX+'output_image':destination.name}
                         audit=_existing_result(root,candidate,record_id)
                         if audit is not None:break
-                        if not destination.exists() and not destination.with_suffix('.json').exists():break
+                        if not destination.exists() and not audit_json_path(destination).exists():break
                         number+=1
                     if audit is None:
                         image=load_tiff(str(source))
@@ -583,7 +618,7 @@ def preprocess_images(images, output_folder, clipping_percentile_range=None, *,
                                 source_metadata=_json_safe(metadata),source_tiff_tags=_json_safe(source_tags),
                                 settings=_json_safe(settings),details=_json_safe(details),libraries=libraries,
                                 verification=dict(float32_pixels_match=True,input_unchanged=True,shape_unchanged=True))
-                            with open(destination.with_suffix('.json'),'x',encoding='utf-8') as f:
+                            with open(audit_json_path(destination),'x',encoding='utf-8') as f:
                                 json.dump(audit,f,indent=2,ensure_ascii=True)
                         except Exception:
                             if created:destination.unlink(missing_ok=True)
@@ -591,7 +626,7 @@ def preprocess_images(images, output_folder, clipping_percentile_range=None, *,
                     if _hash_file(source)!=digest:raise RuntimeError('Source changed during processing.')
                     row.update({PREFIX+k:_scalar_csv(v) for k,v in audit['details'].items()})
                     row.update({PREFIX+'status':'success',PREFIX+'error':'',
-                                PREFIX+'output_image':destination.name,PREFIX+'audit_json':destination.with_suffix('.json').name,
+                                PREFIX+'output_image':destination.name,PREFIX+'audit_json':audit_json_path(destination).relative_to(root).as_posix(),
                                 PREFIX+'output_sha256':audit['output_sha256']})
                     summary['processed']+=1
             except Exception as exc:
@@ -601,6 +636,7 @@ def preprocess_images(images, output_folder, clipping_percentile_range=None, *,
             if record_id in indices:rows[indices[record_id]]=row
             else:indices[record_id]=len(rows);rows.append(row)
             dirty=True
+        progress.status('saving preprocessing CSV')
         public_rows=_parameter_rows(rows)
         # Keep acquisition/custom columns, then append the seven simple columns.
         public_fields=[k for k in fields if not k.startswith(PREFIX) and k not in PARAMETER_COLUMNS]
@@ -613,14 +649,24 @@ def preprocess_images(images, output_folder, clipping_percentile_range=None, *,
         if not csv_file.exists() or fields!=public_fields or public_before!=canonical:
             _atomic_csv(csv_file,canonical,public_fields,csv_hash)
         return summary
-    finally:lock.unlink(missing_ok=True)
+    finally:
+        if progress is not None:progress.close()
+        lock.unlink(missing_ok=True)
+
+
+from sem_paths import (audit_json_path, source_audit_path, json_record_path,
+                       organise_json_records, legacy_json_reference, preprocessing_output_folder,
+                       inside_generated_preprocessing)
+from sem_progress import Progress, instrument_functions
+instrument_functions(globals(),exclude=('preprocess_images',))
 
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('images',nargs='+')
-    parser.add_argument('--output',required=True)
+    parser.add_argument('--output',help='Optional output folder; default: <sample>_preprocessed[_clipped] inside the input folder')
     parser.add_argument('--recursive',action='store_true')
+    parser.add_argument('--no-progress',action='store_true',help='Disable console progress')
     parser.add_argument('--gentle-denoising',action='store_true')
     parser.add_argument('--gaussian-correction-filter',action='store_true')
     parser.add_argument('--background-sigma',type=float)
@@ -629,6 +675,7 @@ if __name__=='__main__':
     args=parser.parse_args()
     result=preprocess_images(args.images,args.output,args.clip,
         gaussian_correction_filter=args.gaussian_correction_filter,background_sigma=args.background_sigma,
-        gentle_denoising=args.gentle_denoising,recursive=args.recursive,input_metadata_csv=args.input_metadata_csv)
+        gentle_denoising=args.gentle_denoising,recursive=args.recursive,input_metadata_csv=args.input_metadata_csv,
+        show_progress=not args.no_progress)
     print(json.dumps(result,indent=2))
     raise SystemExit(1 if result['failed'] else 0)

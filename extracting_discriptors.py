@@ -253,7 +253,8 @@ def _measure_binary_record(record_id, record, folder, destination, metadata_rows
         distribution=_distribution_signature(options), implementation=inspect.getsource(_binary_regions)))
     prefix = record_id[:12] + '__binary__' + measurement_id[:16]
     base = destination / prefix
-    report = base.with_suffix('.json')
+    organise_json_records(destination)
+    report = json_record_path(base.with_suffix('.json'))
     report_hash = seg._hash_file(report) if report.exists() else None
     if report.exists():
         audit = json.loads(report.read_text(encoding='utf-8'))
@@ -295,7 +296,8 @@ def _measure_binary_record(record_id, record, folder, destination, metadata_rows
 
 def particle_size_distribution(images, output_folder=None, *, input_metadata_csv=None,
                                percentile_range=(10, 90), area_basis='solid',
-                               exclude_border=True, histogram_bins=30, methods=None):
+                               exclude_border=True, histogram_bins=30, methods=None,
+                               show_progress=True):
     """Measure all saved successful binary-mask configurations, not overlays.
 
     images is the segmented folder (or its preprocessing parent). Metadata CSV
@@ -308,10 +310,11 @@ def particle_size_distribution(images, output_folder=None, *, input_metadata_csv
     import segmentation as seg
     options = _options(percentile_range, area_basis, exclude_border, histogram_bins)
     folder = Path(images).expanduser().resolve()
-    if not (folder / 'segmentation_records.json').is_file():
+    if not ((folder / 'segmentation_records.json').is_file()
+            or (folder / 'json' / 'segmentation_records.json').is_file()):
         folder = folder / 'segmented'
-    history_file = folder / 'segmentation_records.json'
-    if not history_file.is_file():
+    if not ((folder / 'segmentation_records.json').is_file()
+            or (folder / 'json' / 'segmentation_records.json').is_file()):
         raise FileNotFoundError('Point images at the segmented folder or its preprocessing parent.')
     if input_metadata_csv is None:
         metadata_csv = next((p / 'preprocessing_metadata.csv' for p in folder.parents
@@ -337,7 +340,11 @@ def particle_size_distribution(images, output_folder=None, *, input_metadata_csv
         raise RuntimeError('Another preprocessing/segmentation/descriptor run is active, or its lock is stale.') from exc
     with os.fdopen(fd, 'w') as f:
         f.write(str(os.getpid()))
+    progress = None
     try:
+        organise_json_records(folder)
+        organise_json_records(destination)
+        history_file = json_record_path(folder / 'segmentation_records.json')
         _, metadata, image_column, metadata_hash = seg._read_csv(metadata_csv)
         by_image = {}
         for row in metadata:
@@ -353,9 +360,11 @@ def particle_size_distribution(images, output_folder=None, *, input_metadata_csv
         result = dict(input_count=0, processed=0, skipped=0, failed=0, errors=[], calibration_warnings=[],
             output_folder=str(destination), particle_csv_path=str(destination / 'binary_particles.csv'),
             psd_csv_path=str(destination / 'binary_psd_summary.csv'), history_csv_path=str(folder / 'segmentation_history.csv'))
-        for record_id, record in history['records'].items():
-            if record.get('status') != 'success' or (selected is not None and record.get('settings', {}).get('method') not in selected):
-                continue
+        selected_records = [(key, rec) for key, rec in history['records'].items()
+                            if rec.get('status') == 'success'
+                            and (selected is None or rec.get('settings', {}).get('method') in selected)]
+        progress = Progress(len(selected_records), 'Binary descriptors', enabled=show_progress, unit='records').start()
+        for record_id, record in progress.items(selected_records, name=lambda pair: pair[1].get('source_image', pair[0][:12])):
             result['input_count'] += 1
             try:
                 key = os.path.normcase(str(Path(record['source_path']).resolve()))
@@ -374,6 +383,7 @@ def particle_size_distribution(images, output_folder=None, *, input_metadata_csv
             except Exception as exc:
                 result['failed'] += 1
                 result['errors'].append(dict(segmentation_record_id=record_id, error=f'{type(exc).__name__}: {exc}'))
+        progress.status('saving descriptor and PSD CSVs')
         if seg._hash_file(metadata_csv) != metadata_hash:
             raise RuntimeError('Preprocessing CSV changed during measurement; rerun with the latest calibration.')
         _merge_distribution_audits(folder, destination, audits, 'binary')
@@ -382,7 +392,15 @@ def particle_size_distribution(images, output_folder=None, *, input_metadata_csv
         seg._write_segmentation_history(folder, history)
         return result
     finally:
+        if progress is not None:
+            progress.close()
         lock.unlink(missing_ok=True)
+
+
+from sem_paths import json_record_path, organise_json_records
+from sem_progress import Progress, instrument_functions
+instrument_functions(globals(), exclude=('particle_size_distribution',),
+    include_private=('_binary_regions', '_measure_binary_record', '_write_distribution_files', '_plot_distribution'))
 
 
 if __name__ == '__main__':
@@ -395,10 +413,11 @@ if __name__ == '__main__':
     parser.add_argument('--include-border', action='store_true')
     parser.add_argument('--histogram-bins', type=int, default=30)
     parser.add_argument('--methods', nargs='+')
+    parser.add_argument('--no-progress', action='store_true', help='Disable console progress')
     args = parser.parse_args()
     result = particle_size_distribution(args.images, args.output,
         input_metadata_csv=args.input_metadata_csv, percentile_range=args.percentiles,
         area_basis=args.area_basis, exclude_border=not args.include_border,
-        histogram_bins=args.histogram_bins, methods=args.methods)
+        histogram_bins=args.histogram_bins, methods=args.methods, show_progress=not args.no_progress)
     print(json.dumps(result, indent=2))
     raise SystemExit(1 if result['failed'] else 0)

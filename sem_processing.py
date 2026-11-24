@@ -143,10 +143,15 @@ def process_source(source,destination,info,*,policy_hash,manual_row=None,
         report['analysis_mask_sha256']=core._sha256(mask_path)
         report['analysis_included_pixels']=int(mask.sum())
     report['readable_metadata']=info.csv_fields()
-    audit=actual.with_suffix('.json')
+    audit=audit_json_path(actual)
     # New records are written once; the crop writer has already created its audit.
     if audit.exists():
         audit.write_text(json.dumps(report,indent=2,ensure_ascii=True),encoding='utf-8')
     else:
         with open(audit,'x',encoding='utf-8') as f:json.dump(report,f,indent=2,ensure_ascii=True)
     return report,actual
+
+
+from sem_paths import audit_json_path
+from sem_progress import instrument_functions
+instrument_functions(globals())

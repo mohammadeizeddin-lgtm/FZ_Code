@@ -1,0 +1,12 @@
+{
+  "change": "JSON-only record relocation; automatic parent-named preprocessing output folders; image filenames unchanged.",
+  "checks": [
+    "Upgrade from previous full workflow retains all image/mask/plot/level-set bytes and filenames.",
+    "Extraction CSV audit paths and preprocessing cache pointers updated; equivalent metadata hashes preserve cached results.",
+    "Cached Otsu, Chan-Vese contour measurements and both binary PSDs reused after JSON migration.",
+    "Recognised generated JSON moves to json/ subfolders; raw source sidecars untouched; conflicts retained with an error.",
+    "Clipping selects <sample>_preprocessed_clipped; unclipped selects <sample>_preprocessed; explicit output paths honoured.",
+    "Recursive raw discovery excludes earlier derivative folders; progress and PSD regression suites pass."
+  ],
+  "limitations": "Native scikit-image unavailable; existing solver doubles and independent contourpy were used for contour workflow tests."
+}

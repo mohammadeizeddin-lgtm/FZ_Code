@@ -348,3 +348,6 @@ def prepare_crop_tag_updates(info,crop_row):
 
 
 register_metadata_reader('tescan_binary_v1',lambda tags:isinstance(tags.get(50431),bytes),_tescan)
+
+from sem_progress import instrument_functions
+instrument_functions(globals())

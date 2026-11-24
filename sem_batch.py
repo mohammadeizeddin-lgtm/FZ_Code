@@ -134,7 +134,7 @@ def _safe_output_file(root, relative):
 
 
 def _verified_report(output, source_digest, policy_hash):
-    audit = output.with_suffix('.json')
+    audit = audit_json_path(output)
     if not output.is_file() or not audit.is_file():
         return None
     try:
@@ -175,7 +175,7 @@ def _output_destination(root, source, identity, digest, policy_hash):
             report = _verified_report(path, digest, policy_hash)
             if report is not None:
                 return path, report
-        if all(not p.exists() and not p.with_suffix('.json').exists() for p in candidates):
+        if all(not p.exists() and not audit_json_path(p).exists() for p in candidates):
             return candidates[0], None
         number += 1
 
@@ -219,8 +219,9 @@ def _policy(source, manual_row, mask_value, allow_image_only_crop):
     return token, mask
 
 
-def clip_sem_images_extract_info(images, output_folder, csv_name='metadata.csv', recursive=False,
-                       *, crop_rows=None, exclusion_masks=None, allow_image_only_crop=False):
+def process_sem_images(images, output_folder, csv_name='metadata.csv', recursive=False,
+                       *, crop_rows=None, exclusion_masks=None, allow_image_only_crop=False,
+                       show_progress=True):
     """Process TIFFs incrementally with manufacturer-independent review handling.
 
     Unknown/unconfirmed footer boundaries generate byte-identical review copies,
@@ -244,14 +245,29 @@ def clip_sem_images_extract_info(images, output_folder, csv_name='metadata.csv',
         raise RuntimeError('Another run or a stale .sem_batch.lock exists. Check before retrying.') from exc
     with os.fdopen(fd, 'w') as f:
         f.write(str(os.getpid()))
+    progress = None
     try:
+        for directory in (root, root / 'images', root / 'review'):
+            organise_json_records(directory)
         rows, columns, csv_digest = _read_existing_csv(csv_path)
+        audit_paths_changed = False
+        for existing in rows:
+            relative = existing.get('output_image') or existing.get('review_image')
+            image = _safe_output_file(root, relative)
+            if image is not None and image.is_file():
+                audit = audit_json_path(image)
+                if audit.is_file():
+                    relative_audit = audit.relative_to(root).as_posix()
+                    if existing.get('audit_json') != relative_audit:
+                        existing['audit_json'] = relative_audit
+                        audit_paths_changed = True
         by_id = {row['source_id']: i for i, row in enumerate(rows)}
         summary = dict(input_count=len(sources), added=0, updated=0, skipped=0,
                        failed=0, needs_review=0, review_required=0,
                        csv_path=str(csv_path), errors=[])
-        dirty = False
-        for source in sources:
+        dirty = audit_paths_changed
+        progress = Progress(len(sources), 'SEM extraction', enabled=show_progress).start()
+        for source in progress.items(sources, name=lambda source: source.name):
             identity = _source_id(source)
             previous = rows[by_id[identity]] if identity in by_id else {}
             row = {k:v for k,v in previous.items() if k not in BASE_COLUMNS and
@@ -289,7 +305,7 @@ def clip_sem_images_extract_info(images, output_folder, csv_name='metadata.csv',
                 processing = report['processing']
                 status = processing['status']
                 row.update(status=status, error='',
-                           audit_json=destination.with_suffix('.json').relative_to(root).as_posix(),
+                           audit_json=audit_json_path(destination).relative_to(root).as_posix(),
                            dtype=report['dtype'], crop_method=processing['crop_method'],
                            review_required=processing['review_required'],
                            review_reason=processing['review_reason'],
@@ -324,13 +340,21 @@ def clip_sem_images_extract_info(images, output_folder, csv_name='metadata.csv',
                 by_id[identity] = len(rows)
                 rows.append(row)
             dirty = True
+        progress.status('saving metadata CSV')
         if dirty or not csv_path.exists():
             columns = columns or list(BASE_COLUMNS)
             columns += sorted({k for row in rows for k in row} - set(columns))
             _atomic_csv(csv_path, rows, columns, csv_digest)
         return summary
     finally:
+        if progress is not None:
+            progress.close()
         lock.unlink(missing_ok=True)
+
+
+from sem_paths import audit_json_path, organise_json_records
+from sem_progress import Progress, instrument_functions
+instrument_functions(globals(), exclude=('process_sem_images',))
 
 
 if __name__ == '__main__':
@@ -339,11 +363,13 @@ if __name__ == '__main__':
     parser.add_argument('--output', required=True, help='Output folder')
     parser.add_argument('--csv-name', default='metadata.csv')
     parser.add_argument('--recursive', action='store_true')
+    parser.add_argument('--no-progress', action='store_true', help='Disable console progress')
     parser.add_argument('--allow-image-only-crop', action='store_true', help='Opt in only after validating the footer layout')
     parser.add_argument('--crop-rows', help='JSON mapping of source paths/unique filenames to approved crop rows')
     args = parser.parse_args()
     decisions = json.loads(Path(args.crop_rows).read_text(encoding='utf-8')) if args.crop_rows else None
-    result = clip_sem_images_extract_info(args.images, args.output, args.csv_name, args.recursive,
-        crop_rows=decisions, allow_image_only_crop=args.allow_image_only_crop)
+    result = process_sem_images(args.images, args.output, args.csv_name, args.recursive,
+        crop_rows=decisions, allow_image_only_crop=args.allow_image_only_crop,
+        show_progress=not args.no_progress)
     print(json.dumps(result, indent=2))
     raise SystemExit(1 if result['failed'] else 0)

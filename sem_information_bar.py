@@ -150,7 +150,7 @@ def save_without_information_bar(source_path, output_path, *, crop_row=None,
     Supports classic single-page little-endian uint8/uint16 grayscale TIFF.
     """
     source, output = Path(source_path), Path(output_path)
-    report_path = output.with_suffix('.json')
+    report_path = audit_json_path(output)
     if source.resolve() == output.resolve():
         raise ValueError("Output must be a different file from the original.")
     if output.suffix.lower() not in ('.tif', '.tiff'):
@@ -262,10 +262,16 @@ def save_without_information_bar(source_path, output_path, *, crop_row=None,
     return report
 
 
+from sem_paths import audit_json_path
+from sem_progress import instrument_functions
+instrument_functions(globals())
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('source', type=Path)
     parser.add_argument('output', type=Path)
+    parser.add_argument('--no-progress', action='store_true', help='Disable console progress')
     args = parser.parse_args()
-    report = save_without_information_bar(args.source, args.output)
+    report = save_without_information_bar(args.source, args.output, show_progress=not args.no_progress)
     print(json.dumps({k:report[k] for k in ('source_file','output_file','original_shape','cropped_shape','dtype','calibration')}, indent=2))

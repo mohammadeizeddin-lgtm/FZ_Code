@@ -1,0 +1,12 @@
+{
+  "change": "Percentage progress display only; standard library, no additional dependency.",
+  "checks": [
+    "Success, cached skips, per-image failures, nested stages and disabled display.",
+    "Terminal heartbeat without fabricated solver iteration percentages; clean shutdown.",
+    "Real extraction, cropping, preprocessing, binary descriptors and plotting pipeline; Otsu API double used.",
+    "Source/image/mask bytes unchanged by toggling progress; verified cached results still skip.",
+    "Original implementation-source hashes preserved for preprocessing, Otsu, Chan-Vese, contours and descriptors.",
+    "Full contour/binary PSD workflow regression, parameter variants, CSV preservation and lock cleanup."
+  ],
+  "limitations": "Native scikit-image unavailable. Existing contour workflow uses a solver double and independent contourpy for tests."
+}
